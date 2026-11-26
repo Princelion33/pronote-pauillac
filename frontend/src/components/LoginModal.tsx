@@ -34,12 +34,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     challenge_id: string;
     title: string;
     prompt: string;
+    inputs?: Array<{ name: string; label: string; placeholder?: string; type?: string; maxlength?: string }>;
     input_name?: string;
     input_label?: string;
     choices?: Array<{ name: string; value: string; label: string }>;
     error?: string | null;
   } | null>(null);
   const [verifyCode, setVerifyCode] = useState('');
+  const [verifyValues, setVerifyValues] = useState<Record<string, string>>({});
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -209,6 +211,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       if (json.requires_verification) {
         setEduVerify(json);
         setVerifyCode('');
+        setVerifyValues({});
         setError(json.error || null);
         return;
       }
@@ -232,6 +235,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         body: JSON.stringify({
           challenge_id: eduVerify.challenge_id,
           code: eduVerify.input_name ? verifyCode : undefined,
+          values:
+            eduVerify.inputs && eduVerify.inputs.length > 0 ? verifyValues : undefined,
           choice_name: choice?.name,
           choice_value: choice?.value,
         }),
@@ -243,6 +248,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       if (json.requires_verification) {
         setEduVerify(json);
         setVerifyCode('');
+        setVerifyValues({});
         setError(json.error || null);
         return;
       }
@@ -415,7 +421,37 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 </div>
               )}
 
-              {eduVerify.input_name && (
+              {eduVerify.inputs && eduVerify.inputs.length > 0 ? (
+                <div
+                  className={
+                    eduVerify.inputs.length === 3
+                      ? 'grid grid-cols-3 gap-2.5'
+                      : 'space-y-3'
+                  }
+                >
+                  {eduVerify.inputs.map((inp) => (
+                    <div key={inp.name}>
+                      <label className="block text-[11px] font-bold text-black mb-1 truncate">
+                        {inp.label}
+                      </label>
+                      <input
+                        type={inp.type === 'password' ? 'password' : 'text'}
+                        required
+                        maxLength={inp.maxlength ? Number(inp.maxlength) || undefined : undefined}
+                        value={verifyValues[inp.name] || ''}
+                        onChange={(e) =>
+                          setVerifyValues((prev) => ({
+                            ...prev,
+                            [inp.name]: e.target.value,
+                          }))
+                        }
+                        placeholder={inp.placeholder || inp.label}
+                        className="w-full h-[42px] px-3 rounded-lg border border-black/20 text-[13px] font-bold text-center focus:outline-none focus:border-[#008673] focus:ring-2 focus:ring-[#008673]/20"
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : eduVerify.input_name ? (
                 <div>
                   <label className="block text-[12px] font-bold text-black mb-1">
                     {eduVerify.input_label || 'Code de confirmation'}
@@ -429,9 +465,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     className="w-full h-[42px] px-3.5 rounded-lg border border-black/20 text-[14px] font-bold tracking-wider focus:outline-none focus:border-[#008673] focus:ring-2 focus:ring-[#008673]/20"
                   />
                 </div>
-              )}
+              ) : null}
 
-              {eduVerify.choices && eduVerify.choices.length > 0 && !eduVerify.input_name ? (
+              {eduVerify.choices && eduVerify.choices.length > 0 && !(eduVerify.inputs && eduVerify.inputs.length > 0) && !eduVerify.input_name ? (
                 <div className="space-y-2">
                   {eduVerify.choices.map((ch, idx) => (
                     <button

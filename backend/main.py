@@ -35,8 +35,7 @@ def _inspect_educonnect_verification_form(r: requests.Response, soup: BeautifulS
         return None
 
     hidden_fields: Dict[str, str] = {}
-    visible_input_name = ""
-    visible_input_label = ""
+    inputs: List[Dict[str, str]] = []
     choices: List[Dict[str, str]] = []
 
     for inp in form.find_all("input"):
@@ -51,15 +50,21 @@ def _inspect_educonnect_verification_form(r: requests.Response, soup: BeautifulS
             lbl_el = soup.find("label", {"for": radio_id}) if radio_id else None
             lbl = lbl_el.get_text(" ", strip=True) if lbl_el else (inp.get("value") or name)
             choices.append({"name": name, "value": inp.get("value", ""), "label": lbl})
-        elif itype in ("text", "tel", "number", "date", "password", "email") and not visible_input_name:
-            visible_input_name = name
+        elif itype in ("text", "tel", "number", "date", "password", "email"):
             inp_id = inp.get("id")
             lbl_el = soup.find("label", {"for": inp_id}) if inp_id else None
-            visible_input_label = (
+            lbl = (
                 lbl_el.get_text(" ", strip=True)
                 if lbl_el
-                else (inp.get("placeholder") or "Code de vérification")
+                else (inp.get("placeholder") or inp.get("aria-label") or name)
             )
+            inputs.append({
+                "name": name,
+                "label": lbl,
+                "placeholder": inp.get("placeholder") or lbl,
+                "type": itype,
+                "maxlength": str(inp.get("maxlength") or ""),
+            })
 
     if "shib_idp_ls_supported" in hidden_fields:
         return None
@@ -75,8 +80,11 @@ def _inspect_educonnect_verification_form(r: requests.Response, soup: BeautifulS
         blabel = btn.get_text(" ", strip=True) or btn.get("value") or "Continuer"
         choices.append({"name": bname, "value": btn.get("value", ""), "label": blabel})
 
-    if not visible_input_name and not choices:
+    if not inputs and not choices:
         return None
+
+    visible_input_name = inputs[0]["name"] if inputs else ""
+    visible_input_label = inputs[0]["label"] if inputs else ""
 
     title = soup.title.get_text(strip=True) if soup.title else "Confirmation de l'identité - ÉduConnect"
     prompt_parts: List[str] = []
@@ -98,6 +106,7 @@ def _inspect_educonnect_verification_form(r: requests.Response, soup: BeautifulS
         "prompt": " ".join(prompt_parts) if prompt_parts else "ÉduConnect demande une confirmation de votre identité.",
         "action_url": urljoin(r.url, form.get("action") or r.url),
         "hidden_fields": hidden_fields,
+        "inputs": inputs,
         "input_name": visible_input_name,
         "input_label": visible_input_label,
         "choices": choices,
@@ -282,6 +291,7 @@ def lyceeconnecte_pauillac_ent(username: str, password: str, **kwargs: Any) -> r
                     "challenge_id": challenge_id,
                     "title": verif["title"],
                     "prompt": verif["prompt"],
+                    "inputs": verif["inputs"],
                     "input_name": verif["input_name"],
                     "input_label": verif["input_label"],
                     "choices": verif["choices"],
@@ -1972,6 +1982,7 @@ class LoginRequest(BaseModel):
 class EduConnectVerifyRequest(BaseModel):
     challenge_id: str
     code: Optional[str] = None
+    values: Optional[Dict[str, str]] = None
     choice_name: Optional[str] = None
     choice_value: Optional[str] = None
 
@@ -2152,11 +2163,18 @@ def verify_educonnect(req: EduConnectVerifyRequest):
     payload: Dict[str, str] = dict(form_info.get("hidden_fields") or {})
 
     input_name = form_info.get("input_name")
-    if input_name and req.code is not None:
+    if req.values:
+        for k, v in req.values.items():
+            payload[k] = (v or "").strip()
+    elif input_name and req.code is not None:
         payload[input_name] = req.code.strip()
 
     if req.choice_name:
         payload[req.choice_name] = req.choice_value or ""
+    elif form_info.get("choices"):
+        first_ch = form_info["choices"][0]
+        if first_ch.get("name"):
+            payload[first_ch["name"]] = first_ch.get("value", "")
     elif "_eventId_proceed" not in payload:
         payload["_eventId_proceed"] = ""
 
@@ -2171,6 +2189,7 @@ def verify_educonnect(req: EduConnectVerifyRequest):
                 "challenge_id": req.challenge_id,
                 "title": next_verif["title"],
                 "prompt": next_verif["prompt"],
+                "inputs": next_verif["inputs"],
                 "input_name": next_verif["input_name"],
                 "input_label": next_verif["input_label"],
                 "choices": next_verif["choices"],
