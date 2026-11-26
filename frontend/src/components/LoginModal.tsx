@@ -14,9 +14,17 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   onClose,
   onSuccessLogin,
 }) => {
+  const isRemoteHost =
+    typeof window !== 'undefined' &&
+    !['localhost', '127.0.0.1'].includes(window.location.hostname);
+  const [loginTab, setLoginTab] = useState<'educonnect' | 'qrcode'>(
+    isRemoteHost ? 'qrcode' : 'educonnect'
+  );
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [qrJson, setQrJson] = useState('');
+  const [qrPin, setQrPin] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -44,6 +52,33 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       if (onClose) onClose();
     } catch (err: any) {
       setError(err.message || 'Impossible de joindre le serveur ÉduConnect.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleQrCodeSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setLoading(true);
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          qr_json: qrJson.trim(),
+          pin: qrPin.trim(),
+          mode: 'qrcode',
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json.detail || 'Erreur de connexion par QR Code.');
+      }
+      onSuccessLogin(json.token, 'real');
+      if (onClose) onClose();
+    } catch (err: any) {
+      setError(err.message || 'QR Code invalide ou expiré.');
     } finally {
       setLoading(false);
     }
@@ -129,10 +164,43 @@ export const LoginModal: React.FC<LoginModalProps> = ({
           )}
         </div>
 
-        <form onSubmit={handleEduConnectSubmit} className="p-6 pt-5 space-y-4">
-          <div className="p-3 rounded-lg bg-[#CDF3ED]/55 border border-[#008673]/30 text-[12px] text-[#00584C] font-medium leading-relaxed">
-            Connectez-vous avec votre <strong>identifiant et mot de passe ÉduConnect</strong> (région Nouvelle-Aquitaine / Lycée Connecté) pour accéder à votre espace Pronote du <strong>Lycée Odilon Redon</strong>.
-          </div>
+        {/* Method Selector Tabs */}
+        <div className="grid grid-cols-2 bg-[#F4F7F6] p-1.5 mx-6 mt-5 rounded-lg border border-black/10 gap-1">
+          <button
+            type="button"
+            onClick={() => {
+              setLoginTab('qrcode');
+              setError(null);
+            }}
+            className={`py-2 rounded-md text-[12px] font-bold transition-all cursor-pointer ${
+              loginTab === 'qrcode'
+                ? 'bg-[#008673] text-white shadow-sm'
+                : 'text-black/70 hover:text-black'
+            }`}
+          >
+            QR Code Pronote
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setLoginTab('educonnect');
+              setError(null);
+            }}
+            className={`py-2 rounded-md text-[12px] font-bold transition-all cursor-pointer ${
+              loginTab === 'educonnect'
+                ? 'bg-[#008673] text-white shadow-sm'
+                : 'text-black/70 hover:text-black'
+            }`}
+          >
+            ÉduConnect
+          </button>
+        </div>
+
+        {loginTab === 'educonnect' ? (
+          <form onSubmit={handleEduConnectSubmit} className="p-6 pt-4 space-y-4">
+            <div className="p-3 rounded-lg bg-[#CDF3ED]/55 border border-[#008673]/30 text-[12px] text-[#00584C] font-medium leading-relaxed">
+              Connectez-vous avec votre <strong>identifiant et mot de passe ÉduConnect</strong> (idéal en local ; sur serveur en ligne, préférez l’onglet <strong>QR Code Pronote</strong>).
+            </div>
 
             {error && (
               <div className="p-3 rounded-lg bg-red-50 border border-red-300 text-red-800 text-[12px] font-semibold leading-snug">
@@ -236,6 +304,59 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 : 'Se connecter avec ÉduConnect'}
             </button>
           </form>
+        ) : (
+          <form onSubmit={handleQrCodeSubmit} className="p-6 pt-4 space-y-4">
+            <div className="p-3 rounded-lg bg-[#CDF3ED]/55 border border-[#008673]/30 text-[12px] text-[#00584C] font-medium leading-relaxed">
+              Sur votre Pronote officiel (icône <strong>QR Code</strong> en haut à droite), générez un QR Code avec un code PIN à 4 chiffres, scannez-le pour récupérer son texte JSON et collez-le ci-dessous.
+            </div>
+
+            {error && (
+              <div className="p-3 rounded-lg bg-red-50 border border-red-300 text-red-800 text-[12px] font-semibold leading-snug">
+                {error}
+              </div>
+            )}
+
+            <div>
+              <label className="block text-[12px] font-bold text-black mb-1">
+                Contenu JSON du QR Code Pronote
+              </label>
+              <textarea
+                rows={3}
+                required
+                value={qrJson}
+                onChange={(e) => setQrJson(e.target.value)}
+                placeholder='{"jeton":"...","login":"...","url":"https://0332081h.index-education.net/pronote/eleve.html"}'
+                className="w-full p-2.5 rounded-lg border border-black/20 text-[11px] font-mono focus:outline-none focus:border-[#008673]"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[12px] font-bold text-black mb-1">
+                Code PIN à 4 chiffres
+              </label>
+              <input
+                type="text"
+                maxLength={4}
+                required
+                value={qrPin}
+                onChange={(e) => setQrPin(e.target.value)}
+                placeholder="ex: 1234"
+                className="w-full h-[40px] px-3.5 rounded-lg border border-black/20 text-[13px] font-bold tracking-widest focus:outline-none focus:border-[#008673]"
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              style={{
+                background: 'linear-gradient(90deg, #008673 0%, #009881 100%)',
+              }}
+              className="w-full h-[44px] rounded-lg text-white text-[13px] font-bold shadow-md hover:opacity-95 transition-opacity cursor-pointer disabled:opacity-50"
+            >
+              {loading ? 'Validation du QR Code...' : 'Se connecter par QR Code'}
+            </button>
+          </form>
+        )}
       </motion.div>
     </div>
   );
