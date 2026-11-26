@@ -2171,18 +2171,17 @@ def verify_educonnect(req: EduConnectVerifyRequest):
     input_name = form_info.get("input_name")
     if req.values:
         for k, v in req.values.items():
-            payload[k] = (v or "").strip()
-        # If ÉduConnect has a hidden combined date field (e.g. dateNaissance), populate JJ/MM/AAAA
-        inputs_meta = form_info.get("inputs") or []
-        if len(inputs_meta) == 3:
-            v_list = [(req.values.get(m["name"]) or "").strip() for m in inputs_meta]
-            if all(v.isdigit() for v in v_list):
-                combined_dob = f"{v_list[0].zfill(2)}/{v_list[1].zfill(2)}/{v_list[2]}"
-                for hk in list(payload.keys()):
-                    if "date" in hk.lower() and not payload[hk]:
-                        payload[hk] = combined_dob
+            val = (v or "").strip()
+            if k in ("jour", "mois") and val.isdigit() and len(val) == 1:
+                val = val.zfill(2)
+            payload[k] = val
     elif input_name and req.code is not None:
         payload[input_name] = req.code.strip()
+
+    if "j_username" in payload and not payload["j_username"]:
+        payload["j_username"] = pending["username"]
+    if "j_password" in payload and not payload["j_password"]:
+        payload["j_password"] = pending["password"]
 
     if req.choice_name:
         payload[req.choice_name] = req.choice_value or ""
@@ -2201,7 +2200,11 @@ def verify_educonnect(req: EduConnectVerifyRequest):
         payload["_eventId_proceed"] = ""
 
     try:
-        print(f"[ENT Verify Submit] url={form_info['action_url']} keys={list(payload.keys())!r}", flush=True)
+        print(
+            f"[ENT Verify Submit] url={form_info['action_url']} keys={list(payload.keys())!r} "
+            f"has_user={bool(payload.get('j_username'))} has_pass={bool(payload.get('j_password'))}",
+            flush=True,
+        )
         r = session.post(form_info["action_url"], data=payload, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
         v_title = soup.title.get_text(strip=True) if soup.title else ""
