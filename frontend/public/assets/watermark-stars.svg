@@ -1,0 +1,15 @@
+<svg width="85" height="82" viewBox="0 0 85 82" fill="none" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="Group 4">
+<path id="Star 1" d="M33.904 9.08456L29.0342 32.8178L6.50623 42.4507L27.8227 54.197L29.9837 78.2691L48.0278 61.7955L33.904 9.08456Z" stroke-width="4" stroke-linejoin="round" stroke="#009881"/>
+<path id="Star 2" d="M49.9879 27.2032L33.9039 9.08455L48.0278 61.7955L71.8913 67.04L61.7267 45.1124L74.3142 24.2816L49.9879 27.2032Z" fill="url(#pattern0_100_231)" stroke="#009881" stroke-width="4" stroke-linejoin="round"/>
+</g>
+<defs>
+<pattern id="pattern0_100_231" patternUnits="userSpaceOnUse" patternTransform="matrix(7.24444 -1.94114 3.88229 14.4889 56.3108 34.5595)" preserveAspectRatio="none" viewBox="0 0 150 300" width="1" height="1">
+<use xlink:href="#pattern0_100_231_inner" transform="translate(-150 0)"/>
+<g id="pattern0_100_231_inner">
+<circle id="Ellipse 4" cx="50" cy="50" r="50" fill="#009881"/>
+</g>
+<use xlink:href="#pattern0_100_231_inner" transform="translate(-75 150)"/>
+<use xlink:href="#pattern0_100_231_inner" transform="translate(75 150)"/>
+</pattern></defs>
+</svg>
