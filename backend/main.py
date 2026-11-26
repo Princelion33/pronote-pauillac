@@ -30,7 +30,7 @@ def _inspect_educonnect_verification_form(r: requests.Response, soup: BeautifulS
     """Extracts ÉduConnect identity-confirmation / OTP / method-choice form metadata."""
     if soup.find("input", {"name": "SAMLResponse"}):
         return None
-    form = soup.find("form")
+    form = soup.find("form", {"id": "validerAuth"}) or soup.find("form")
     if not form:
         return None
 
@@ -260,7 +260,35 @@ def lyceeconnecte_pauillac_ent(username: str, password: str, **kwargs: Any) -> r
                 f"ÉduConnect a rejeté la requête (HTTP {r.status_code} — {post_title or 'Erreur serveur'})."
             )
 
-        # Vérification : identifiant/mot de passe invalide vs page de confirmation d'identité
+        is_confirmation_page = any(
+            k in post_title.lower()
+            for k in ("confirmation", "identité", "vérification", "double authentification")
+        )
+
+        # Vérifier si ÉduConnect demande une confirmation d'identité AVANT de tester validerAuth
+        if is_confirmation_page or (not soup.find("input", {"name": "j_password"}) and not soup.find("form", {"id": "validerAuth"})):
+            verif = _inspect_educonnect_verification_form(r, soup)
+            if verif:
+                challenge_id = str(uuid.uuid4())
+                PENDING_EDUCONNECT[challenge_id] = {
+                    "session": session,
+                    "username": username.strip(),
+                    "password": password,
+                    "pronote_url": pronote_target,
+                    "form": verif,
+                }
+                keep_session_open = True
+                raise EduConnectVerificationRequired({
+                    "challenge_id": challenge_id,
+                    "title": verif["title"],
+                    "prompt": verif["prompt"],
+                    "input_name": verif["input_name"],
+                    "input_label": verif["input_label"],
+                    "choices": verif["choices"],
+                    "error": verif["error"],
+                })
+
+        # Vérification : identifiant/mot de passe invalide
         if soup.find("input", {"name": "j_password"}) or soup.find("form", {"id": "validerAuth"}):
             error_texts = []
             for err_el in soup.select(".fr-alert--error, .fr-alert, .fr-error-text, .alert, p.error, [role='alert'], #erreurMdp, #erreurIdentifiant, .message-erreur"):
@@ -274,28 +302,6 @@ def lyceeconnecte_pauillac_ent(username: str, password: str, **kwargs: Any) -> r
                 else f"Échec de connexion ÉduConnect (HTTP {r.status_code}, page: {post_title or 'Connexion'})."
             )
             raise ENTLoginError(err_msg)
-
-        # Vérifier si ÉduConnect demande une confirmation d'identité (SMS / Mail / OTP)
-        verif = _inspect_educonnect_verification_form(r, soup)
-        if verif:
-            challenge_id = str(uuid.uuid4())
-            PENDING_EDUCONNECT[challenge_id] = {
-                "session": session,
-                "username": username.strip(),
-                "password": password,
-                "pronote_url": pronote_target,
-                "form": verif,
-            }
-            keep_session_open = True
-            raise EduConnectVerificationRequired({
-                "challenge_id": challenge_id,
-                "title": verif["title"],
-                "prompt": verif["prompt"],
-                "input_name": verif["input_name"],
-                "input_label": verif["input_label"],
-                "choices": verif["choices"],
-                "error": verif["error"],
-            })
 
         return _finish_educonnect_saml_and_cas(session, r, soup, pronote_target)
     finally:
