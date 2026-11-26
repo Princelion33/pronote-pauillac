@@ -17,10 +17,168 @@ import pronotepy
 from pronotepy.exceptions import ENTLoginError
 
 
+PENDING_EDUCONNECT: Dict[str, Dict[str, Any]] = {}
+
+
+class EduConnectVerificationRequired(Exception):
+    def __init__(self, payload: Dict[str, Any]) -> None:
+        self.payload = payload
+        super().__init__(payload.get("title") or "Confirmation de l'identité requise")
+
+
+def _inspect_educonnect_verification_form(r: requests.Response, soup: BeautifulSoup) -> Optional[Dict[str, Any]]:
+    """Extracts ÉduConnect identity-confirmation / OTP / method-choice form metadata."""
+    if soup.find("input", {"name": "SAMLResponse"}):
+        return None
+    form = soup.find("form")
+    if not form:
+        return None
+
+    hidden_fields: Dict[str, str] = {}
+    visible_input_name = ""
+    visible_input_label = ""
+    choices: List[Dict[str, str]] = []
+
+    for inp in form.find_all("input"):
+        name = inp.get("name")
+        if not name:
+            continue
+        itype = (inp.get("type") or "text").lower()
+        if itype == "hidden":
+            hidden_fields[name] = inp.get("value", "")
+        elif itype == "radio":
+            radio_id = inp.get("id")
+            lbl_el = soup.find("label", {"for": radio_id}) if radio_id else None
+            lbl = lbl_el.get_text(" ", strip=True) if lbl_el else (inp.get("value") or name)
+            choices.append({"name": name, "value": inp.get("value", ""), "label": lbl})
+        elif itype in ("text", "tel", "number", "date", "password", "email") and not visible_input_name:
+            visible_input_name = name
+            inp_id = inp.get("id")
+            lbl_el = soup.find("label", {"for": inp_id}) if inp_id else None
+            visible_input_label = (
+                lbl_el.get_text(" ", strip=True)
+                if lbl_el
+                else (inp.get("placeholder") or "Code de vérification")
+            )
+
+    if "shib_idp_ls_supported" in hidden_fields:
+        return None
+
+    for btn in form.find_all(["button", "input"]):
+        if btn.name == "input" and (btn.get("type") or "").lower() not in ("submit", "button"):
+            continue
+        if btn.name == "button" and (btn.get("type") or "submit").lower() not in ("submit", ""):
+            continue
+        bname = btn.get("name")
+        if not bname or "cancel" in bname.lower() or "retour" in (btn.get_text(strip=True) or "").lower():
+            continue
+        blabel = btn.get_text(" ", strip=True) or btn.get("value") or "Continuer"
+        choices.append({"name": bname, "value": btn.get("value", ""), "label": blabel})
+
+    if not visible_input_name and not choices:
+        return None
+
+    title = soup.title.get_text(strip=True) if soup.title else "Confirmation de l'identité - ÉduConnect"
+    prompt_parts: List[str] = []
+    for el in soup.select("h1, h2, .fr-callout p, .fr-alert p, form p"):
+        txt = el.get_text(" ", strip=True)
+        if txt and txt not in prompt_parts and len(txt) > 8:
+            prompt_parts.append(txt)
+        if len(prompt_parts) >= 3:
+            break
+
+    error_texts: List[str] = []
+    for err_el in soup.select(".fr-alert--error, .fr-error-text, [role='alert'], .message-erreur"):
+        txt = err_el.get_text(" ", strip=True)
+        if txt and txt not in error_texts:
+            error_texts.append(txt)
+
+    return {
+        "title": title,
+        "prompt": " ".join(prompt_parts) if prompt_parts else "ÉduConnect demande une confirmation de votre identité.",
+        "action_url": urljoin(r.url, form.get("action") or r.url),
+        "hidden_fields": hidden_fields,
+        "input_name": visible_input_name,
+        "input_label": visible_input_label,
+        "choices": choices,
+        "error": error_texts[0] if error_texts else None,
+    }
+
+
+def _finish_educonnect_saml_and_cas(
+    session: requests.Session,
+    r: requests.Response,
+    soup: BeautifulSoup,
+    pronote_url: str,
+) -> requests.cookies.RequestsCookieJar:
+    """Completes intermediate Shibboleth forms, SAML ACS post, and CAS login to Pronote."""
+    for _ in range(5):
+        if soup.find("input", {"name": "SAMLResponse"}):
+            break
+        next_form = soup.find("form")
+        if not next_form:
+            break
+        step_payload: Dict[str, str] = {}
+        for inp in next_form.find_all("input"):
+            name = inp.get("name")
+            if not name:
+                continue
+            inp_type = (inp.get("type") or "").lower()
+            if inp_type in ("radio", "checkbox"):
+                if inp.has_attr("checked") or name not in step_payload:
+                    step_payload[name] = inp.get("value", "")
+            else:
+                step_payload[name] = inp.get("value", "")
+
+        if "shib_idp_ls_supported" in step_payload:
+            step_payload["shib_idp_ls_supported"] = "true"
+        if "shib_idp_ls_success.shib_idp_session_ss" in step_payload:
+            step_payload["shib_idp_ls_success.shib_idp_session_ss"] = "true"
+        if "_eventId_proceed" not in step_payload:
+            step_payload["_eventId_proceed"] = ""
+
+        step_action = urljoin(r.url, next_form.get("action") or r.url)
+        r = session.post(step_action, data=step_payload, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
+
+    saml_input = soup.find("input", {"name": "SAMLResponse"})
+    if not saml_input:
+        page_alerts = [
+            el.get_text(" ", strip=True)
+            for el in soup.select(".fr-alert, .fr-callout, h1, .error")
+            if el.get_text(strip=True)
+        ]
+        detail = page_alerts[0] if page_alerts else "Action requise sur votre compte ÉduConnect (première connexion ou validation)."
+        raise ENTLoginError(f"ÉduConnect n'a pas renvoyé de jeton SAML : {detail}")
+
+    saml_form = saml_input.find_parent("form") or soup.find("form")
+    saml_payload = {
+        inp.get("name"): inp.get("value", "")
+        for inp in saml_form.find_all("input")
+        if inp.get("name")
+    }
+    acs_url = urljoin(r.url, saml_form.get("action") or "https://mon.lyceeconnecte.fr/auth/saml/acs")
+    session.post(acs_url, data=saml_payload, timeout=15)
+
+    cas_resp = session.get(
+        "https://mon.lyceeconnecte.fr/cas/login",
+        params={"service": pronote_url},
+        allow_redirects=True,
+        timeout=15,
+    )
+    if "index-education.net" not in (cas_resp.url or ""):
+        raise ENTLoginError(
+            "Connexion ÉduConnect validée, mais la redirection CAS vers Pronote Pauillac (0332081H) a échoué. "
+            "Essayez la connexion par QR Code Pronote."
+        )
+
+    return session.cookies
+
+
 def lyceeconnecte_pauillac_ent(username: str, password: str, **kwargs: Any) -> requests.cookies.RequestsCookieJar:
     """
     Authentification SAML2 complète pour ÉduConnect -> Lycée Connecté Nouvelle-Aquitaine (mon.lyceeconnecte.fr)
-    avec gestion des étapes Shibboleth IdP v4/v5 (localStorage e1s1 + csrf_token sur e1s2 + SAMLResponse).
+    avec gestion des étapes Shibboleth IdP v4/v5 et de la confirmation d'identité interactive.
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -31,11 +189,14 @@ def lyceeconnecte_pauillac_ent(username: str, password: str, **kwargs: Any) -> r
         "https://educonnect.education.gouv.fr/idp/profile/SAML2/Unsolicited/SSO"
         "?providerId=https://mon.lyceeconnecte.fr/auth/saml/metadata/idp.xml"
     )
+    pronote_target = kwargs.get("pronote_url") or PRONOTE_URL
 
-    with requests.Session() as session:
+    session = requests.Session()
+    keep_session_open = False
+    try:
         session.headers.update(headers)
 
-        # Étape 1 : Chargement initial Shibboleth (e1s1 - vérification localStorage + csrf_token)
+        # Étape 1 : Chargement initial Shibboleth (e1s1)
         r = session.get(sso_url, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
         page_title = soup.title.get_text(strip=True) if soup.title else ""
@@ -67,7 +228,7 @@ def lyceeconnecte_pauillac_ent(username: str, password: str, **kwargs: Any) -> r
             page_title = soup.title.get_text(strip=True) if soup.title else ""
             print(f"[ENT Step 1b POST] status={r.status_code} url={r.url} title={page_title!r}", flush=True)
 
-        # Étape 2 : Soumission du formulaire d'authentification ÉduConnect (e1s2 - form#validerAuth avec csrf_token)
+        # Étape 2 : Soumission du formulaire d'authentification ÉduConnect (e1s2)
         auth_form = soup.find("form", {"id": "validerAuth"}) or soup.find("form")
         if not auth_form:
             body_lower = r.text.lower()
@@ -99,7 +260,7 @@ def lyceeconnecte_pauillac_ent(username: str, password: str, **kwargs: Any) -> r
                 f"ÉduConnect a rejeté la requête (HTTP {r.status_code} — {post_title or 'Erreur serveur'})."
             )
 
-        # Vérification des erreurs d'identifiant / mot de passe / CAPTCHA renvoyées par ÉduConnect
+        # Vérification : identifiant/mot de passe invalide vs page de confirmation d'identité
         if soup.find("input", {"name": "j_password"}) or soup.find("form", {"id": "validerAuth"}):
             error_texts = []
             for err_el in soup.select(".fr-alert--error, .fr-alert, .fr-error-text, .alert, p.error, [role='alert'], #erreurMdp, #erreurIdentifiant, .message-erreur"):
@@ -107,80 +268,39 @@ def lyceeconnecte_pauillac_ent(username: str, password: str, **kwargs: Any) -> r
                 if txt and txt not in error_texts:
                     error_texts.append(txt)
             print(f"[ENT Step 2 Errors] errors={error_texts!r}", flush=True)
-            if error_texts:
-                err_msg = error_texts[0]
-            else:
-                err_msg = (
-                    f"Échec de connexion ÉduConnect (HTTP {r.status_code}, page: {post_title or 'Connexion'}). "
-                    "Vérifiez vos identifiants ou si ÉduConnect bloque l'IP du serveur Render."
-                )
+            err_msg = (
+                error_texts[0]
+                if error_texts
+                else f"Échec de connexion ÉduConnect (HTTP {r.status_code}, page: {post_title or 'Connexion'})."
+            )
             raise ENTLoginError(err_msg)
 
-        # Étape 3 : Franchissement des éventuelles étapes intermédiaires Shibboleth (e1s3 sauvegarde localStorage, choix élève)
-        for _ in range(5):
-            if soup.find("input", {"name": "SAMLResponse"}):
-                break
-            next_form = soup.find("form")
-            if not next_form:
-                break
-            step_payload: Dict[str, str] = {}
-            for inp in next_form.find_all("input"):
-                name = inp.get("name")
-                if not name:
-                    continue
-                inp_type = (inp.get("type") or "").lower()
-                if inp_type in ("radio", "checkbox"):
-                    if inp.has_attr("checked") or name not in step_payload:
-                        step_payload[name] = inp.get("value", "")
-                else:
-                    step_payload[name] = inp.get("value", "")
+        # Vérifier si ÉduConnect demande une confirmation d'identité (SMS / Mail / OTP)
+        verif = _inspect_educonnect_verification_form(r, soup)
+        if verif:
+            challenge_id = str(uuid.uuid4())
+            PENDING_EDUCONNECT[challenge_id] = {
+                "session": session,
+                "username": username.strip(),
+                "password": password,
+                "pronote_url": pronote_target,
+                "form": verif,
+            }
+            keep_session_open = True
+            raise EduConnectVerificationRequired({
+                "challenge_id": challenge_id,
+                "title": verif["title"],
+                "prompt": verif["prompt"],
+                "input_name": verif["input_name"],
+                "input_label": verif["input_label"],
+                "choices": verif["choices"],
+                "error": verif["error"],
+            })
 
-            if "shib_idp_ls_supported" in step_payload:
-                step_payload["shib_idp_ls_supported"] = "true"
-            if "shib_idp_ls_success.shib_idp_session_ss" in step_payload:
-                step_payload["shib_idp_ls_success.shib_idp_session_ss"] = "true"
-            if "_eventId_proceed" not in step_payload:
-                step_payload["_eventId_proceed"] = ""
-
-            step_action = urljoin(r.url, next_form.get("action") or r.url)
-            r = session.post(step_action, data=step_payload, timeout=15)
-            soup = BeautifulSoup(r.text, "html.parser")
-
-        # Étape 4 : Envoi de la réponse SAMLResponse vers mon.lyceeconnecte.fr/auth/saml/acs
-        saml_input = soup.find("input", {"name": "SAMLResponse"})
-        if not saml_input:
-            page_alerts = [
-                el.get_text(" ", strip=True)
-                for el in soup.select(".fr-alert, .fr-callout, h1, .error")
-                if el.get_text(strip=True)
-            ]
-            detail = page_alerts[0] if page_alerts else "Action requise sur votre compte ÉduConnect (première connexion ou validation)."
-            raise ENTLoginError(f"ÉduConnect n'a pas renvoyé de jeton SAML : {detail}")
-
-        saml_form = saml_input.find_parent("form") or soup.find("form")
-        saml_payload = {
-            inp.get("name"): inp.get("value", "")
-            for inp in saml_form.find_all("input")
-            if inp.get("name")
-        }
-        acs_url = urljoin(r.url, saml_form.get("action") or "https://mon.lyceeconnecte.fr/auth/saml/acs")
-        session.post(acs_url, data=saml_payload, timeout=15)
-
-        # Étape 5 : Échange du ticket CAS Lycée Connecté vers Pronote (0332081H)
-        pronote_target = kwargs.get("pronote_url") or PRONOTE_URL
-        cas_resp = session.get(
-            "https://mon.lyceeconnecte.fr/cas/login",
-            params={"service": pronote_target},
-            allow_redirects=True,
-            timeout=15,
-        )
-        if "index-education.net" not in (cas_resp.url or ""):
-            raise ENTLoginError(
-                "Connexion ÉduConnect validée, mais la redirection CAS vers Pronote Pauillac (0332081H) a échoué. "
-                "Essayez la connexion par QR Code Pronote."
-            )
-
-        return session.cookies
+        return _finish_educonnect_saml_and_cas(session, r, soup, pronote_target)
+    finally:
+        if not keep_session_open:
+            session.close()
 
 
 app = FastAPI(
@@ -1843,6 +1963,13 @@ class LoginRequest(BaseModel):
     mode: str = "educonnect"  # "educonnect" | "qrcode" | "demo"
 
 
+class EduConnectVerifyRequest(BaseModel):
+    challenge_id: str
+    code: Optional[str] = None
+    choice_name: Optional[str] = None
+    choice_value: Optional[str] = None
+
+
 class HomeworkToggleRequest(BaseModel):
     homework_id: str
 
@@ -1988,6 +2115,8 @@ def login(req: LoginRequest):
             "user": state["user"],
             "message": f"Connecté à PRONOTE 2026 ({state['user']['name']})",
         }
+    except EduConnectVerificationRequired as ver:
+        return {"requires_verification": True, **ver.payload}
     except HTTPException:
         raise
     except Exception as e:
@@ -2001,6 +2130,86 @@ def login(req: LoginRequest):
             status_code=401,
             detail=err_str,
         )
+
+
+@app.post("/api/auth/educonnect-verify")
+def verify_educonnect(req: EduConnectVerifyRequest):
+    pending = PENDING_EDUCONNECT.get(req.challenge_id)
+    if not pending:
+        raise HTTPException(
+            status_code=404,
+            detail="Session de vérification ÉduConnect expirée. Veuillez recommencer la connexion.",
+        )
+
+    session: requests.Session = pending["session"]
+    form_info: Dict[str, Any] = pending["form"]
+    payload: Dict[str, str] = dict(form_info.get("hidden_fields") or {})
+
+    input_name = form_info.get("input_name")
+    if input_name and req.code is not None:
+        payload[input_name] = req.code.strip()
+
+    if req.choice_name:
+        payload[req.choice_name] = req.choice_value or ""
+    elif "_eventId_proceed" not in payload:
+        payload["_eventId_proceed"] = ""
+
+    try:
+        r = session.post(form_info["action_url"], data=payload, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
+        next_verif = _inspect_educonnect_verification_form(r, soup)
+        if next_verif:
+            pending["form"] = next_verif
+            return {
+                "requires_verification": True,
+                "challenge_id": req.challenge_id,
+                "title": next_verif["title"],
+                "prompt": next_verif["prompt"],
+                "input_name": next_verif["input_name"],
+                "input_label": next_verif["input_label"],
+                "choices": next_verif["choices"],
+                "error": next_verif["error"],
+            }
+
+        cookies = _finish_educonnect_saml_and_cas(session, r, soup, pending["pronote_url"])
+        PENDING_EDUCONNECT.pop(req.challenge_id, None)
+        session.close()
+
+        client = pronotepy.Client(
+            PRONOTE_URL,
+            username=pending["username"],
+            password=pending["password"],
+            ent=lambda u, p, **kw: cookies,
+        )
+        if not client.logged_in:
+            raise HTTPException(
+                status_code=401,
+                detail="Vérification réussie mais connexion à Pronote Pauillac refusée.",
+            )
+
+        state, refs = extract_real_pronote_state(client)
+        token = str(uuid.uuid4())
+        SESSIONS[token] = {
+            "mode": "real",
+            "client": client,
+            "state": state,
+            "refs": refs,
+        }
+        return {
+            "token": token,
+            "mode": "real",
+            "user": state["user"],
+            "message": f"Connecté à PRONOTE 2026 via ÉduConnect ({state['user']['name']})",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        PENDING_EDUCONNECT.pop(req.challenge_id, None)
+        try:
+            session.close()
+        except Exception:
+            pass
+        raise HTTPException(status_code=401, detail=str(e))
 
 
 @app.get("/api/state")

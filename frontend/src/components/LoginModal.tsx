@@ -30,6 +30,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [cameraActive, setCameraActive] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [eduVerify, setEduVerify] = useState<{
+    challenge_id: string;
+    title: string;
+    prompt: string;
+    input_name?: string;
+    input_label?: string;
+    choices?: Array<{ name: string; value: string; label: string }>;
+    error?: string | null;
+  } | null>(null);
+  const [verifyCode, setVerifyCode] = useState('');
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -196,10 +206,51 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       if (!res.ok) {
         throw new Error(json.detail || 'Erreur de connexion ÉduConnect.');
       }
+      if (json.requires_verification) {
+        setEduVerify(json);
+        setVerifyCode('');
+        setError(json.error || null);
+        return;
+      }
       onSuccessLogin(json.token, 'real');
       if (onClose) onClose();
     } catch (err: any) {
       setError(err.message || 'Impossible de joindre le serveur ÉduConnect.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleEduVerifySubmit = async (choice?: { name: string; value: string }) => {
+    if (!eduVerify) return;
+    setError(null);
+    setLoading(true);
+    try {
+      const res = await fetch('/api/auth/educonnect-verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          challenge_id: eduVerify.challenge_id,
+          code: eduVerify.input_name ? verifyCode : undefined,
+          choice_name: choice?.name,
+          choice_value: choice?.value,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        throw new Error(json.detail || 'Échec de vérification ÉduConnect.');
+      }
+      if (json.requires_verification) {
+        setEduVerify(json);
+        setVerifyCode('');
+        setError(json.error || null);
+        return;
+      }
+      setEduVerify(null);
+      onSuccessLogin(json.token, 'real');
+      if (onClose) onClose();
+    } catch (err: any) {
+      setError(err.message || 'Erreur lors de la vérification.');
     } finally {
       setLoading(false);
     }
@@ -345,6 +396,83 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         </div>
 
         {loginTab === 'educonnect' ? (
+          eduVerify ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleEduVerifySubmit();
+              }}
+              className="p-6 pt-4 space-y-4"
+            >
+              <div className="p-3 rounded-lg bg-[#CDF3ED]/55 border border-[#008673]/30 text-[12px] text-[#00584C] leading-relaxed">
+                <strong className="block text-[13px] mb-1">{eduVerify.title}</strong>
+                <span>{eduVerify.prompt}</span>
+              </div>
+
+              {error && (
+                <div className="p-3 rounded-lg bg-red-50 border border-red-300 text-red-800 text-[12px] font-semibold leading-snug">
+                  {error}
+                </div>
+              )}
+
+              {eduVerify.input_name && (
+                <div>
+                  <label className="block text-[12px] font-bold text-black mb-1">
+                    {eduVerify.input_label || 'Code de confirmation'}
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={verifyCode}
+                    onChange={(e) => setVerifyCode(e.target.value)}
+                    placeholder="Entrez le code reçu..."
+                    className="w-full h-[42px] px-3.5 rounded-lg border border-black/20 text-[14px] font-bold tracking-wider focus:outline-none focus:border-[#008673] focus:ring-2 focus:ring-[#008673]/20"
+                  />
+                </div>
+              )}
+
+              {eduVerify.choices && eduVerify.choices.length > 0 && !eduVerify.input_name ? (
+                <div className="space-y-2">
+                  {eduVerify.choices.map((ch, idx) => (
+                    <button
+                      key={`${ch.name}-${idx}`}
+                      type="button"
+                      disabled={loading}
+                      onClick={() => handleEduVerifySubmit({ name: ch.name, value: ch.value })}
+                      style={{
+                        background: 'linear-gradient(90deg, #008673 0%, #009881 100%)',
+                      }}
+                      className="w-full py-2.5 px-4 rounded-lg text-white text-[13px] font-bold shadow-sm hover:opacity-95 transition-opacity cursor-pointer disabled:opacity-50"
+                    >
+                      {loading ? 'Envoi en cours...' : ch.label}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={loading}
+                  style={{
+                    background: 'linear-gradient(90deg, #008673 0%, #009881 100%)',
+                  }}
+                  className="w-full h-[44px] rounded-lg text-white text-[13px] font-bold shadow-md hover:opacity-95 transition-opacity cursor-pointer disabled:opacity-50"
+                >
+                  {loading ? 'Vérification en cours...' : 'Confirmer mon identité'}
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  setEduVerify(null);
+                  setError(null);
+                }}
+                className="w-full py-2 text-[12px] font-semibold text-black/60 hover:text-black cursor-pointer"
+              >
+                ← Revenir à la connexion ÉduConnect
+              </button>
+            </form>
+          ) : (
           <form onSubmit={handleEduConnectSubmit} className="p-6 pt-4 space-y-4">
             <div className="p-3 rounded-lg bg-[#CDF3ED]/55 border border-[#008673]/30 text-[12px] text-[#00584C] font-medium leading-relaxed">
               Connectez-vous avec votre <strong>identifiant et mot de passe ÉduConnect</strong> (idéal en local ; sur serveur en ligne, préférez l’onglet <strong>QR Code Pronote</strong>).
@@ -452,6 +580,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 : 'Se connecter avec ÉduConnect'}
             </button>
           </form>
+          )
         ) : (
           <form onSubmit={handleQrCodeSubmit} className="p-6 pt-4 space-y-4">
             <div className="p-3 rounded-lg bg-[#CDF3ED]/55 border border-[#008673]/30 text-[12px] text-[#00584C] font-medium leading-relaxed">
