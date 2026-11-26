@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion } from 'framer-motion';
+import jsQR from 'jsqr';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -25,8 +26,155 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [qrJson, setQrJson] = useState('');
   const [qrPin, setQrPin] = useState('');
+  const [qrStatus, setQrStatus] = useState<string | null>(null);
+  const [cameraActive, setCameraActive] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const rafRef = useRef<number | null>(null);
+
+  const stopCamera = useCallback(() => {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    setCameraActive(false);
+  }, []);
+
+  const applyDecodedQr = useCallback(
+    (rawText: string) => {
+      try {
+        const parsed = JSON.parse(rawText);
+        if (!parsed || typeof parsed !== 'object' || !parsed.jeton) {
+          throw new Error('Not a Pronote QR');
+        }
+        setQrJson(rawText);
+        setQrStatus('✓ QR Code Pronote lu avec succès !');
+        setError(null);
+        stopCamera();
+      } catch {
+        setError("Ce QR Code n'est pas un QR Code de connexion Pronote valide.");
+      }
+    },
+    [stopCamera]
+  );
+
+  const decodeQrFromImageFile = useCallback(
+    (file: File | Blob) => {
+      setError(null);
+      setQrStatus(null);
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            setError("Impossible de lire l'image dans ce navigateur.");
+            return;
+          }
+          ctx.drawImage(img, 0, 0);
+          const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          const code = jsQR(imageData.data, imageData.width, imageData.height);
+          if (code && code.data) {
+            applyDecodedQr(code.data);
+          } else {
+            setError(
+              'Aucun QR Code détecté dans cette capture. Essaie une capture plus nette autour du carré QR.'
+            );
+          }
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        setError("Impossible de charger l'image.");
+      };
+      img.src = url;
+    },
+    [applyDecodedQr]
+  );
+
+  useEffect(() => {
+    if (!isOpen || loginTab !== 'qrcode') {
+      stopCamera();
+      return;
+    }
+    const handlePaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.type.startsWith('image/')) {
+          const blob = item.getAsFile();
+          if (blob) {
+            e.preventDefault();
+            decodeQrFromImageFile(blob);
+            return;
+          }
+        }
+      }
+    };
+    window.addEventListener('paste', handlePaste);
+    return () => {
+      window.removeEventListener('paste', handlePaste);
+    };
+  }, [isOpen, loginTab, decodeQrFromImageFile, stopCamera]);
+
+  useEffect(() => {
+    return () => stopCamera();
+  }, [stopCamera]);
+
+  const startCamera = async () => {
+    setError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' },
+      });
+      streamRef.current = stream;
+      setCameraActive(true);
+      const scanFrame = () => {
+        const video = videoRef.current;
+        if (!streamRef.current) return;
+        if (video && video.readyState === video.HAVE_ENOUGH_DATA) {
+          const canvas = document.createElement('canvas');
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const code = jsQR(imageData.data, imageData.width, imageData.height);
+            if (code && code.data) {
+              applyDecodedQr(code.data);
+              return;
+            }
+          }
+        }
+        rafRef.current = requestAnimationFrame(scanFrame);
+      };
+      setTimeout(() => {
+        if (videoRef.current && streamRef.current) {
+          videoRef.current.srcObject = streamRef.current;
+          videoRef.current.play().catch(() => {});
+          rafRef.current = requestAnimationFrame(scanFrame);
+        }
+      }, 50);
+    } catch {
+      setError("Accès à la caméra refusé ou indisponible. Utilise plutôt Ctrl+V ou l'import de capture !");
+      stopCamera();
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -307,7 +455,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         ) : (
           <form onSubmit={handleQrCodeSubmit} className="p-6 pt-4 space-y-4">
             <div className="p-3 rounded-lg bg-[#CDF3ED]/55 border border-[#008673]/30 text-[12px] text-[#00584C] font-medium leading-relaxed">
-              Sur votre Pronote officiel (icône <strong>QR Code</strong> en haut à droite), générez un QR Code avec un code PIN à 4 chiffres, scannez-le pour récupérer son texte JSON et collez-le ci-dessous.
+              Sur ton Pronote officiel (icône <strong>QR Code</strong> en haut à droite), génère un QR Code avec un PIN à 4 chiffres, fais une capture d’écran (<strong>Win+Shift+S</strong>) puis fais simplement <strong>Ctrl+V</strong> ici !
             </div>
 
             {error && (
@@ -316,19 +464,76 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               </div>
             )}
 
-            <div>
-              <label className="block text-[12px] font-bold text-black mb-1">
-                Contenu JSON du QR Code Pronote
-              </label>
-              <textarea
-                rows={3}
-                required
-                value={qrJson}
-                onChange={(e) => setQrJson(e.target.value)}
-                placeholder='{"jeton":"...","login":"...","url":"https://0332081h.index-education.net/pronote/eleve.html"}'
-                className="w-full p-2.5 rounded-lg border border-black/20 text-[11px] font-mono focus:outline-none focus:border-[#008673]"
+            {qrStatus && (
+              <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-300 text-emerald-800 text-[12px] font-bold leading-snug">
+                {qrStatus}
+              </div>
+            )}
+
+            {/* Easy Paste / Drop / Upload / Camera QR box */}
+            <div
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                const file = e.dataTransfer.files?.[0];
+                if (file) decodeQrFromImageFile(file);
+              }}
+              className="rounded-xl border-2 border-dashed border-[#008673]/45 bg-[#F4F7F6] p-3.5 text-center space-y-2.5"
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) decodeQrFromImageFile(file);
+                }}
               />
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-3.5 py-2 rounded-lg bg-white hover:bg-[#CDF3ED]/50 border border-black/15 text-[12px] font-bold text-[#00584C] cursor-pointer shadow-sm transition-colors"
+                >
+                  📷 Importer une image
+                </button>
+                <button
+                  type="button"
+                  onClick={() => (cameraActive ? stopCamera() : startCamera())}
+                  className="px-3.5 py-2 rounded-lg bg-white hover:bg-[#CDF3ED]/50 border border-black/15 text-[12px] font-bold text-[#00584C] cursor-pointer shadow-sm transition-colors"
+                >
+                  {cameraActive ? '⏹ Arrêter caméra' : '🎥 Scanner caméra'}
+                </button>
+              </div>
+              <p className="text-[11px] font-medium text-black/60">
+                Ou appuie directement sur <strong>Ctrl+V</strong> après une capture d’écran !
+              </p>
+              {cameraActive && (
+                <video
+                  ref={videoRef}
+                  playsInline
+                  muted
+                  className="w-full max-h-[180px] rounded-lg border border-black/15 object-cover"
+                />
+              )}
             </div>
+
+            <details className="text-[11px] text-black/65">
+              <summary className="cursor-pointer font-semibold hover:text-black">
+                Avancé : coller le texte JSON manuellement
+              </summary>
+              <textarea
+                rows={2}
+                value={qrJson}
+                onChange={(e) => {
+                  setQrJson(e.target.value);
+                  setQrStatus(e.target.value.trim() ? '✓ JSON saisi' : null);
+                }}
+                placeholder='{"jeton":"...","login":"...","url":"https://0332081h.index-education.net/pronote/eleve.html"}'
+                className="w-full mt-2 p-2 rounded-lg border border-black/20 text-[11px] font-mono focus:outline-none focus:border-[#008673]"
+              />
+            </details>
 
             <div>
               <label className="block text-[12px] font-bold text-black mb-1">
@@ -347,7 +552,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
             <button
               type="submit"
-              disabled={loading}
+              disabled={loading || !qrJson.trim()}
               style={{
                 background: 'linear-gradient(90deg, #008673 0%, #009881 100%)',
               }}
