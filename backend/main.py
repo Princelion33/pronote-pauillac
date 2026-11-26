@@ -38,6 +38,13 @@ def lyceeconnecte_pauillac_ent(username: str, password: str, **kwargs: Any) -> r
         # Étape 1 : Chargement initial Shibboleth (e1s1 - vérification localStorage + csrf_token)
         r = session.get(sso_url, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
+        page_title = soup.title.get_text(strip=True) if soup.title else ""
+        print(f"[ENT Step 1 GET] status={r.status_code} url={r.url} title={page_title!r}", flush=True)
+
+        if r.status_code >= 400:
+            raise ENTLoginError(
+                f"ÉduConnect a refusé la connexion depuis le serveur (HTTP {r.status_code} — {page_title or 'Accès bloqué'})."
+            )
 
         form = soup.find("form")
         if form and not soup.find("input", {"name": "j_username"}):
@@ -57,11 +64,21 @@ def lyceeconnecte_pauillac_ent(username: str, password: str, **kwargs: Any) -> r
             action_url = urljoin(r.url, form.get("action") or r.url)
             r = session.post(action_url, data=ls_payload, timeout=15)
             soup = BeautifulSoup(r.text, "html.parser")
+            page_title = soup.title.get_text(strip=True) if soup.title else ""
+            print(f"[ENT Step 1b POST] status={r.status_code} url={r.url} title={page_title!r}", flush=True)
+
+        body_lower = r.text.lower()
+        if any(w in body_lower for w in ("captcha", "access denied", "accès refusé", "temporairement indisponible")):
+            raise ENTLoginError(
+                f"ÉduConnect bloque ou demande un contrôle anti-bot sur ce serveur (HTTP {r.status_code} — {page_title or 'CAPTCHA/WAF'})."
+            )
 
         # Étape 2 : Soumission du formulaire d'authentification ÉduConnect (e1s2 - form#validerAuth avec csrf_token)
         auth_form = soup.find("form", {"id": "validerAuth"}) or soup.find("form")
         if not auth_form:
-            raise ENTLoginError("Formulaire ÉduConnect introuvable. Veuillez réessayer.")
+            raise ENTLoginError(
+                f"Formulaire ÉduConnect introuvable (HTTP {r.status_code}, page: {page_title or r.url})."
+            )
 
         auth_payload = {
             inp.get("name"): inp.get("value", "")
@@ -75,19 +92,29 @@ def lyceeconnecte_pauillac_ent(username: str, password: str, **kwargs: Any) -> r
         auth_action = urljoin(r.url, auth_form.get("action") or r.url)
         r = session.post(auth_action, data=auth_payload, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
+        post_title = soup.title.get_text(strip=True) if soup.title else ""
+        print(f"[ENT Step 2 POST] status={r.status_code} url={r.url} title={post_title!r}", flush=True)
 
-        # Vérification des erreurs d'identifiant / mot de passe renvoyées par ÉduConnect
+        if r.status_code >= 400:
+            raise ENTLoginError(
+                f"ÉduConnect a rejeté la requête (HTTP {r.status_code} — {post_title or 'Erreur serveur'})."
+            )
+
+        # Vérification des erreurs d'identifiant / mot de passe / CAPTCHA renvoyées par ÉduConnect
         if soup.find("input", {"name": "j_password"}) or soup.find("form", {"id": "validerAuth"}):
             error_texts = []
-            for err_el in soup.select(".fr-alert--error, .fr-error-text, [role='alert'], #erreurMdp, #erreurIdentifiant, .message-erreur"):
+            for err_el in soup.select(".fr-alert--error, .fr-alert, .fr-error-text, .alert, p.error, [role='alert'], #erreurMdp, #erreurIdentifiant, .message-erreur"):
                 txt = err_el.get_text(" ", strip=True)
                 if txt and txt not in error_texts:
                     error_texts.append(txt)
-            err_msg = (
-                error_texts[0]
-                if error_texts
-                else "Votre identifiant ou votre mot de passe est incorrect. Veuillez vérifier les informations de votre compte ÉduConnect."
-            )
+            print(f"[ENT Step 2 Errors] errors={error_texts!r}", flush=True)
+            if error_texts:
+                err_msg = error_texts[0]
+            else:
+                err_msg = (
+                    f"Échec de connexion ÉduConnect (HTTP {r.status_code}, page: {post_title or 'Connexion'}). "
+                    "Vérifiez vos identifiants ou si ÉduConnect bloque l'IP du serveur Render."
+                )
             raise ENTLoginError(err_msg)
 
         # Étape 3 : Franchissement des éventuelles étapes intermédiaires Shibboleth (e1s3 sauvegarde localStorage, choix élève)
