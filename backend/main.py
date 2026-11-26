@@ -67,15 +67,14 @@ def lyceeconnecte_pauillac_ent(username: str, password: str, **kwargs: Any) -> r
             page_title = soup.title.get_text(strip=True) if soup.title else ""
             print(f"[ENT Step 1b POST] status={r.status_code} url={r.url} title={page_title!r}", flush=True)
 
-        body_lower = r.text.lower()
-        if any(w in body_lower for w in ("captcha", "access denied", "accès refusé", "temporairement indisponible")):
-            raise ENTLoginError(
-                f"ÉduConnect bloque ou demande un contrôle anti-bot sur ce serveur (HTTP {r.status_code} — {page_title or 'CAPTCHA/WAF'})."
-            )
-
         # Étape 2 : Soumission du formulaire d'authentification ÉduConnect (e1s2 - form#validerAuth avec csrf_token)
         auth_form = soup.find("form", {"id": "validerAuth"}) or soup.find("form")
         if not auth_form:
+            body_lower = r.text.lower()
+            if any(w in body_lower for w in ("captcha", "access denied", "accès refusé", "temporairement indisponible")):
+                raise ENTLoginError(
+                    f"ÉduConnect bloque ou demande un contrôle anti-bot sur ce serveur (HTTP {r.status_code} — {page_title or 'CAPTCHA/WAF'})."
+                )
             raise ENTLoginError(
                 f"Formulaire ÉduConnect introuvable (HTTP {r.status_code}, page: {page_title or r.url})."
             )
