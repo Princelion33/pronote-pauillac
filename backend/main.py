@@ -101,6 +101,12 @@ def _inspect_educonnect_verification_form(r: requests.Response, soup: BeautifulS
         if txt and txt not in error_texts:
             error_texts.append(txt)
 
+    print(
+        f"[ENT Verif Form] action={form.get('action')!r} hidden={list(hidden_fields.keys())!r} "
+        f"inputs={[i['name'] for i in inputs]!r} choices={choices!r}",
+        flush=True,
+    )
+
     return {
         "title": title,
         "prompt": " ".join(prompt_parts) if prompt_parts else "ÉduConnect demande une confirmation de votre identité.",
@@ -2166,21 +2172,40 @@ def verify_educonnect(req: EduConnectVerifyRequest):
     if req.values:
         for k, v in req.values.items():
             payload[k] = (v or "").strip()
+        # If ÉduConnect has a hidden combined date field (e.g. dateNaissance), populate JJ/MM/AAAA
+        inputs_meta = form_info.get("inputs") or []
+        if len(inputs_meta) == 3:
+            v_list = [(req.values.get(m["name"]) or "").strip() for m in inputs_meta]
+            if all(v.isdigit() for v in v_list):
+                combined_dob = f"{v_list[0].zfill(2)}/{v_list[1].zfill(2)}/{v_list[2]}"
+                for hk in list(payload.keys()):
+                    if "date" in hk.lower() and not payload[hk]:
+                        payload[hk] = combined_dob
     elif input_name and req.code is not None:
         payload[input_name] = req.code.strip()
 
     if req.choice_name:
         payload[req.choice_name] = req.choice_value or ""
     elif form_info.get("choices"):
-        first_ch = form_info["choices"][0]
-        if first_ch.get("name"):
-            payload[first_ch["name"]] = first_ch.get("value", "")
+        preferred = next(
+            (
+                c for c in form_info["choices"]
+                if c.get("name") == "_eventId_proceed"
+                or any(w in (c.get("label") or "").lower() for w in ("valider", "continuer", "confirmer"))
+            ),
+            form_info["choices"][0],
+        )
+        if preferred.get("name"):
+            payload[preferred["name"]] = preferred.get("value", "")
     elif "_eventId_proceed" not in payload:
         payload["_eventId_proceed"] = ""
 
     try:
+        print(f"[ENT Verify Submit] url={form_info['action_url']} keys={list(payload.keys())!r}", flush=True)
         r = session.post(form_info["action_url"], data=payload, timeout=15)
         soup = BeautifulSoup(r.text, "html.parser")
+        v_title = soup.title.get_text(strip=True) if soup.title else ""
+        print(f"[ENT Verify Resp] status={r.status_code} url={r.url} title={v_title!r}", flush=True)
         next_verif = _inspect_educonnect_verification_form(r, soup)
         if next_verif:
             pending["form"] = next_verif
